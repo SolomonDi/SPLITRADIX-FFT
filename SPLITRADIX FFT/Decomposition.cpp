@@ -1,131 +1,114 @@
-#include "Decomposition.h"
-#include <iostream>
-#include <cmath>
-#include <algorithm>
+﻿#include "Decomposition.h"
+#include <unordered_map>
 
-Decomposition::Decomposition(uint _N) : N(_N) {
-    findLDecompose();
+Decomposition::Decomposition(uint n) : N(n) {
+    factorize();
+    optimize();
 }
+
+void Decomposition::factorize() {
+
+    uint n = N;
+    factors.clear();
+
+    while (n % 2 == 0) {
+        factors.push_back(2);
+        n /= 2;
+    }
+
+    for (uint d = 3; d * d <= n; d += 2) {
+        while (n % d == 0) {
+            factors.push_back(d);
+            n /= d;
+        }
+    }
+
+    if (n > 1)
+        factors.push_back(n);
+}
+
+
+
+void Decomposition::optimize() {
+
+    std::unordered_map<uint, uint> cnt;
+
+    for (auto f : factors)
+        cnt[f]++;
+
+    std::vector<uint> result;
+
+    auto can = [&](uint p, uint k) {
+        return cnt[p] >= k;
+        };
+
+    auto use = [&](uint p, uint k) {
+        cnt[p] -= k;
+        };
+
+    while (true) {
+
+        if (can(2, 3)) {
+            use(2, 3);
+            result.push_back(8);
+        }
+        else if (can(2, 1) && can(5, 1)) {
+            use(2, 1);
+            use(5, 1);
+            result.push_back(10);
+        }
+        else if (can(2, 1) && can(3, 1)) {
+            use(2, 1);
+            use(3, 1);
+            result.push_back(6);
+        }
+        else if (can(2, 2)) {
+            use(2, 2);
+            result.push_back(4);
+        }
+        else {
+            break;
+        }
+    }
+
+
+    for (auto& [p, c] : cnt) {
+        for (uint i = 0; i < c; ++i)
+            result.push_back(p);
+    }
+
+
+    std::vector<uint> ordered;
+    std::vector<bool> used(result.size(), false);
+
+    for (auto pref : PreferredFactors) {
+        for (size_t i = 0; i < result.size(); ++i) {
+            if (!used[i] && result[i] == pref) {
+                ordered.push_back(result[i]);
+                used[i] = true;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < result.size(); ++i) {
+        if (!used[i])
+            ordered.push_back(result[i]);
+    }
+
+    factors = ordered;
+}
+
+
 
 void Decomposition::print() const {
-    std::cout << "N = " << N << " decomposed into "
-        << lrows << " x " << lcols << std::endl;
-    std::cout << "Transposed matrix: "
-        << InRows << " x " << InCols << std::endl;
-    std::cout << "M_size = " << M_size << std::endl;
-}
 
-bool Decomposition::canbeDecompose(uint n) {
-    if (n <= 1) return false;
+    std::cout << "N = " << N << " = ";
 
-    for (uint coeff : Coeffs) {
-        if (coeff > n) continue;
-        if (n % coeff == 0) return true;
-    }
-    return false;
-}
-
-uint Decomposition::findBestDivisior(uint n) {
-    if (n <= 1) return 1;
-
-    uint bestDivisor = 1;
-    int minRemainder = n - 1;
-
-    for (uint coeff : Coeffs) {
-        if (coeff > n) continue;
-
-        uint divisor = coeff;
-        uint quotient = n / divisor;
-        uint remainder = n % divisor;
-
-        if (remainder == 0) {
-            return divisor;
-        }
-
-        int currRemainder = std::min(static_cast<int>(remainder),
-            static_cast<int>(divisor - remainder));
-
-        if (currRemainder < minRemainder) {
-            minRemainder = currRemainder;
-            bestDivisor = divisor;
-        }
+    for (size_t i = 0; i < factors.size(); ++i) {
+        std::cout << factors[i];
+        if (i != factors.size() - 1)
+            std::cout << " * ";
     }
 
-    return bestDivisor;
-}
-
-std::optional<Decomposition::DecompRes>
-Decomposition::tryDecomp(uint rows, uint cols, uint bDiff) {
-
-    if (rows == 0 || cols == 0) return std::nullopt;
-
-    uint mSize = rows * cols;
-    if (mSize < N) return std::nullopt;
-
-    uint diff = mSize - N;
-    if (diff > bDiff) return std::nullopt;
-
-    DecompRes result;
-    result.inRows = cols;
-    result.inCols = rows;
-    result.mSize = mSize;
-
-    return result;
-}
-
-void Decomposition::findLDecompose() {
-    uint sqrtN = static_cast<uint>(std::sqrt(static_cast<double>(N)));
-
-    lrows = 1;
-    lcols = N;
-    InRows = lcols;
-    InCols = lrows;
-    M_size = lrows * lcols;
-
-    uint bestDiff = M_size - N;
-
-    for (uint i = 1; i <= sqrtN; ++i) {
-        if (N % i == 0) {
-            uint row = i;
-            uint col = N / i;
-
-            auto result = tryDecomp(row, col, bestDiff);
-            if (result.has_value()) {
-                lrows = row;
-                lcols = col;
-                InRows = result->inRows;
-                InCols = result->inCols;
-                M_size = result->mSize;
-                bestDiff = M_size - N;
-            }
-
-            result = tryDecomp(col, row, bestDiff);
-            if (result.has_value()) {
-                lrows = col;
-                lcols = row;
-                InRows = result->inRows;
-                InCols = result->inCols;
-                M_size = result->mSize;
-                bestDiff = M_size - N;
-            }
-        }
-    }
-
-    if (bestDiff > 0 && canbeDecompose(N)) {
-        uint divisor = findBestDivisior(N);
-
-        if (divisor > 1) {
-            uint row = divisor;
-            uint col = (N + divisor - 1) / divisor;
-
-            auto result = tryDecomp(row, col, bestDiff);
-            if (result.has_value() && (result->mSize - N) < bestDiff) {
-                lrows = row;
-                lcols = col;
-                InRows = result->inRows;
-                InCols = result->inCols;
-                M_size = result->mSize;
-            }
-        }
-    }
+    std::cout << "\n";
 }

@@ -2,45 +2,30 @@
 #ifndef DECOMPOSITION_H
 #define DECOMPOSITION_H
 
+#include <vector>
 #include <cstdint>
-#include <optional>
+#include <iostream>
 #include <array>
-
 
 using uint = std::uint32_t;
 
-extern constexpr std::array<uint, 22> Coeffs{
-		2U, 4U, 8U, 16U, 32U, 64U, 128U,
-		256U, 3U, 5U, 7U, 11U, 13U, 17U,
-		6U, 10U, 12U, 20U, 24U, 40U, 80U, 100U
-};
-
 struct Decomposition {
 
-	uint N{};
-	uint lrows{};
-	uint lcols{};
-	uint InRows{};
-	uint InCols{};
-	uint M_size{};
+    uint N{};
+    std::vector<uint> factors;
 
-	explicit Decomposition(uint _N);
-	
-	void print() const;
+    explicit Decomposition(uint n);
+
+    void print() const;
 
 private:
-	struct DecompRes {
 
-		uint inRows{};
-		uint inCols{};
-		uint mSize{};
-	};
+    void factorize();
+    void optimize();
 
-	bool canbeDecompose(uint n);
-	std::optional<DecompRes> tryDecomp(uint rows, uint cols, uint bDiff);
-	void findLDecompose();
-	uint findBestDivisior(uint n);
-
+    inline static constexpr std::array<uint, 8> PreferredFactors{
+        8, 10, 6, 4, 2, 3, 5, 7
+    };
 };
 
-#endif 
+#endif

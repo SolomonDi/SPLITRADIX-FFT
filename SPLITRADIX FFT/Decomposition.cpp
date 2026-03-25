@@ -12,19 +12,19 @@ void Decomposition::factorize() {
     factors.clear();
 
     while (n % 2 == 0) {
-        factors.push_back(2);
+        factors.emplace_back(2);
         n /= 2;
     }
 
     for (uint d = 3; d * d <= n; d += 2) {
         while (n % d == 0) {
-            factors.push_back(d);
+            factors.emplace_back(d);
             n /= d;
         }
     }
 
     if (n > 1)
-        factors.push_back(n);
+        factors.emplace_back(n);
 }
 
 
@@ -50,21 +50,21 @@ void Decomposition::optimize() {
 
         if (can(2, 3)) {
             use(2, 3);
-            result.push_back(8);
+            result.emplace_back(8);
         }
         else if (can(2, 1) && can(5, 1)) {
             use(2, 1);
             use(5, 1);
-            result.push_back(10);
+            result.emplace_back(10);
         }
         else if (can(2, 1) && can(3, 1)) {
             use(2, 1);
             use(3, 1);
-            result.push_back(6);
+            result.emplace_back(6);
         }
         else if (can(2, 2)) {
             use(2, 2);
-            result.push_back(4);
+            result.emplace_back(4);
         }
         else {
             break;
@@ -74,7 +74,7 @@ void Decomposition::optimize() {
 
     for (auto& [p, c] : cnt) {
         for (uint i = 0; i < c; ++i)
-            result.push_back(p);
+            result.emplace_back(p);
     }
 
 
@@ -84,7 +84,7 @@ void Decomposition::optimize() {
     for (auto pref : PreferredFactors) {
         for (size_t i = 0; i < result.size(); ++i) {
             if (!used[i] && result[i] == pref) {
-                ordered.push_back(result[i]);
+                ordered.emplace_back(result[i]);
                 used[i] = true;
             }
         }
@@ -92,7 +92,7 @@ void Decomposition::optimize() {
 
     for (size_t i = 0; i < result.size(); ++i) {
         if (!used[i])
-            ordered.push_back(result[i]);
+            ordered.emplace_back(result[i]);
     }
 
     factors = ordered;

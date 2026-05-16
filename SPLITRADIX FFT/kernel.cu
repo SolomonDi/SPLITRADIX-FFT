@@ -6,9 +6,8 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
-
-#include "Decomposition.h"   
-
+#include <algorithm>
+#include "Decomposition.h"
 
 using complex = cuComplex;
 
@@ -16,140 +15,192 @@ using complex = cuComplex;
 #define CUFFT_CHECK(x) do { if((x) != CUFFT_SUCCESS) { std::cout << "CUFFT Error\n"; exit(1); } } while(0)
 
 constexpr float PI = 3.14159265358979323846f;
-constexpr int BLOCK = 256;
+constexpr int BLOCK_1D = 256;
+constexpr int TILE_DIM = 32;
 
-
-__global__ void reshape(complex* out, complex* in, int r, int m) {
+// Исправлено: твиддлы считаются с учетом сегментации внутри строки N
+__global__ void twiddle_batch(complex* data, int r, int m, int num_rows, int N) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int N = r * m; if (idx >= N) return;
-    int i = idx / m, j = idx % m;
-    out[j * r + i] = in[idx];
-}
+    if (idx >= N * num_rows) return;
 
-__global__ void inv_reshape(complex* out, complex* in, int r, int m) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int N = r * m; if (idx >= N) return;
-    int j = idx / r, i = idx % r;
-    out[i * m + j] = in[idx];
-}
+    int elem_idx = idx % N;
+    int segment_size = r * m;
+    int local_idx = elem_idx % segment_size;
 
-__global__ void twiddle(complex* data, int r, int m, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-    int k = idx % r;      
-    int j = idx / r;
-    float angle = -2.0f * PI * k * j / (float)N;
-    float c = cosf(angle), s = sinf(angle);
+    int k = local_idx % r;
+    int j = local_idx / r;
+
+    float angle = -2.0f * PI * (k * j) / (float)segment_size;
+    complex w = make_cuComplex(cosf(angle), sinf(angle));
     complex a = data[idx];
-    data[idx].x = a.x * c - a.y * s;
-    data[idx].y = a.x * s + a.y * c;
+
+    data[idx].x = a.x * w.x - a.y * w.y;
+    data[idx].y = a.x * w.y + a.y * w.x;
 }
 
 __global__ void transpose(complex* out, complex* in, int width, int height) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x < width && y < height)
-        out[x * height + y] = in[y * width + x];
+    __shared__ complex tile[TILE_DIM][TILE_DIM + 1];
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+    int x = blockIdx.x * TILE_DIM + tx;
+    int y = blockIdx.y * TILE_DIM + ty;
+
+    if (x < width && y < height) {
+        tile[ty][tx] = in[y * width + x];
+    }
+
+    __syncthreads();
+
+    x = blockIdx.y * TILE_DIM + tx;
+    y = blockIdx.x * TILE_DIM + ty;
+
+    if (x < height && y < width) {
+        out[y * height + x] = tile[tx][ty];
+    }
 }
 
+// Исправлено: reshape распределяет данные по всем сегментам строки N
+__global__ void reshape_batch(complex* out, complex* in, int r, int m, int num_rows, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N * num_rows) return;
 
-void fft_stage(complex* d_data, int r, int m) {
+    int row = idx / N;
+    int elem_idx = idx % N;
+
+    int segment_size = r * m;
+    int segment_idx = elem_idx / segment_size;
+    int local_idx = elem_idx % segment_size;
+
+    int i = local_idx / m;
+    int j = local_idx % m;
+
+    int new_local_idx = j * r + i;
+    int new_elem_idx = segment_idx * segment_size + new_local_idx;
+
+    out[row * N + new_elem_idx] = in[idx];
+}
+
+// Исправлено: обратный reshape собирает данные со всех сегментов строки N
+__global__ void inv_reshape_batch(complex* out, complex* in, int r, int m, int num_rows, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N * num_rows) return;
+
+    int row = idx / N;
+    int elem_idx = idx % N;
+
+    int segment_size = r * m;
+    int segment_idx = elem_idx / segment_size;
+    int local_idx = elem_idx % segment_size;
+
+    int j = local_idx / r;
+    int i = local_idx % r;
+
+    int new_local_idx = i * m + j;
+    int new_elem_idx = segment_idx * segment_size + new_local_idx;
+
+    out[row * N + new_elem_idx] = in[idx];
+}
+
+void fft_stage_batch(complex* d_data, int r, int N, int num_rows) {
     cufftHandle plan;
-    int n[1] = { r };
-    CUFFT_CHECK(cufftPlanMany(&plan, 1, n, nullptr, 1, r, nullptr, 1, r, CUFFT_C2C, m));
+    int n[] = { r }; 
+    int howmany = (N / r) * num_rows;
+
+    CUFFT_CHECK(cufftPlanMany(&plan, 1, n,
+        nullptr, 1, r,
+        nullptr, 1, r,
+        CUFFT_C2C, howmany));
+
     CUFFT_CHECK(cufftExecC2C(plan, d_data, d_data, CUFFT_FORWARD));
     cufftDestroy(plan);
 }
 
-void FFT_pipeline(complex* d_in_out, int N, const std::vector<uint>& factors, complex* d_temp) {
+
+
+void FFT_pipeline_batch(complex* d_in_out, int N, const std::vector<uint>& factors,
+    complex* d_temp, int num_rows) {
     complex* current = d_in_out;
     complex* tmp = d_temp;
     int currentN = N;
 
+    int total_elements = N * num_rows;
+    int blocks = (total_elements + BLOCK_1D - 1) / BLOCK_1D;
+
     for (size_t s = 0; s < factors.size(); ++s) {
         int r = factors[s];
         int m = currentN / r;
-        int blocks = (currentN + BLOCK - 1) / BLOCK;
 
-        reshape <<<blocks, BLOCK >> > (tmp, current, r, m);
-        CUDA_CHECK(cudaDeviceSynchronize());
+        reshape_batch << <blocks, BLOCK_1D >> > (tmp, current, r, m, num_rows, N);
         std::swap(current, tmp);
 
-        fft_stage(current, r, m);
+        fft_stage_batch(current, r, N, num_rows);
 
         if (s != factors.size() - 1) {
-            twiddle <<<blocks, BLOCK >> > (current, r, m, N);
-            CUDA_CHECK(cudaDeviceSynchronize());
+            twiddle_batch << <blocks, BLOCK_1D >> > (current, r, m, num_rows, N);
         }
 
-        inv_reshape <<<blocks, BLOCK >> > (tmp, current, r, m);
-        CUDA_CHECK(cudaDeviceSynchronize());
+        inv_reshape_batch << <blocks, BLOCK_1D >> > (tmp, current, r, m, num_rows, N);
         std::swap(current, tmp);
 
         currentN = m;
     }
 
-   
     if (current != d_in_out) {
-        CUDA_CHECK(cudaMemcpy(d_in_out, current, N * sizeof(complex), cudaMemcpyDeviceToDevice));
+        size_t total_bytes = (size_t)N * num_rows * sizeof(complex);
+        CUDA_CHECK(cudaMemcpy(d_in_out, current, total_bytes, cudaMemcpyDeviceToDevice));
     }
 }
 
 __host__ int main(void) {
-
-
-    const int WIDTH = 8000;   
-    const int HEIGHT = 6000;
+    const int WIDTH = 12000;
+    const int HEIGHT = 16000;
+    const size_t TOTAL_SIZE = (size_t)WIDTH * HEIGHT;
 
     Decomposition row_dec(WIDTH);
     Decomposition col_dec(HEIGHT);
     row_dec.print();
     col_dec.print();
 
-    complex* d_data = nullptr, * d_trans = nullptr, * d_temp = nullptr;
+    complex* h_pinned = nullptr;
+    CUDA_CHECK(cudaMallocHost(&h_pinned, TOTAL_SIZE * sizeof(complex)));
 
-    CUDA_CHECK(cudaMalloc(&d_data, (size_t)WIDTH * HEIGHT * sizeof(complex)));
-    CUDA_CHECK(cudaMalloc(&d_trans, (size_t)WIDTH * HEIGHT * sizeof(complex)));
-    CUDA_CHECK(cudaMalloc(&d_temp, std::max(WIDTH, HEIGHT) * sizeof(complex)));
-
-
-
-
-    std::vector<complex> h(WIDTH * HEIGHT, make_cuComplex(1.0f, 0.0f));
-    CUDA_CHECK(cudaMemcpy(d_data, h.data(), (size_t)WIDTH * HEIGHT * sizeof(complex), cudaMemcpyHostToDevice));
-
-
-
-
-    for (int y = 0; y < HEIGHT; ++y) {
-        complex* row = d_data + (size_t)y * WIDTH;
-        FFT_pipeline(row, WIDTH, row_dec.factors, d_temp);
+    for (size_t i = 0; i < TOTAL_SIZE; ++i) {
+        h_pinned[i] = make_cuComplex(1.0f, 0.0f);
     }
 
+    complex* d_data = nullptr;
+    complex* d_trans = nullptr;
+    complex* d_temp = nullptr;
 
+    CUDA_CHECK(cudaMalloc(&d_data, TOTAL_SIZE * sizeof(complex)));
+    CUDA_CHECK(cudaMalloc(&d_trans, TOTAL_SIZE * sizeof(complex)));
+    CUDA_CHECK(cudaMalloc(&d_temp, TOTAL_SIZE * sizeof(complex)));
 
+    CUDA_CHECK(cudaMemcpy(d_data, h_pinned, TOTAL_SIZE * sizeof(complex), cudaMemcpyHostToDevice));
 
-    dim3 block(32, 32);
-    dim3 grid((WIDTH + 31) / 32, (HEIGHT + 31) / 32);
-    transpose << <grid, block >> > (d_trans, d_data, WIDTH, HEIGHT);  
-    CUDA_CHECK(cudaGetLastError());          
-    CUDA_CHECK(cudaDeviceSynchronize());   
- 
+    // 1. БПФ по строкам 
+    FFT_pipeline_batch(d_data, WIDTH, row_dec.factors, d_temp, HEIGHT);
+    CUDA_CHECK(cudaDeviceSynchronize());
 
- 
-   
-    for (int y = 0; y < WIDTH; ++y) {
-        complex* trow = d_trans + (size_t)y * HEIGHT;
-        FFT_pipeline(trow, HEIGHT, col_dec.factors, d_temp);
-    }
+    // 2. Транспонирование матрицы
+    dim3 block(TILE_DIM, TILE_DIM);
+    dim3 grid((WIDTH + TILE_DIM - 1) / TILE_DIM, (HEIGHT + TILE_DIM - 1) / TILE_DIM);
+    transpose << <grid, block >> > (d_trans, d_data, WIDTH, HEIGHT);
+    CUDA_CHECK(cudaDeviceSynchronize());
 
+    // 3. БПФ по столбцам
+    FFT_pipeline_batch(d_trans, HEIGHT, col_dec.factors, d_temp, WIDTH);
+    CUDA_CHECK(cudaDeviceSynchronize());
 
+    CUDA_CHECK(cudaMemcpy(h_pinned, d_trans, TOTAL_SIZE * sizeof(complex), cudaMemcpyDeviceToHost));
 
-    CUDA_CHECK(cudaMemcpy(h.data(), d_trans, (size_t)WIDTH * HEIGHT * sizeof(complex), cudaMemcpyDeviceToHost));
-    float dc = sqrtf(h[0].x * h[0].x + h[0].y * h[0].y);
-    std::cout << "2d DC component (" << WIDTH << "×" << HEIGHT << ") = " << dc
-        << " (waiting " << (WIDTH * HEIGHT) << ")\n";
+    float dc = sqrtf(h_pinned[0].x * h_pinned[0].x + h_pinned[0].y * h_pinned[0].y);
+    std::cout << "2D DC component (" << WIDTH << "*" << HEIGHT << ") = " << dc
+        << " (waiting " << (long long)WIDTH * HEIGHT << ")\n";
 
+    cudaFreeHost(h_pinned);
     cudaFree(d_data);
     cudaFree(d_trans);
     cudaFree(d_temp);

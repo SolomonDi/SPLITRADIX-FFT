@@ -23,9 +23,7 @@ private:
     void factorize();
     void optimize();
 
-    inline static constexpr std::array<uint, 8> PreferredFactors{
-        8, 10, 6, 4, 2, 3, 5, 7
-    };
+    inline static constexpr std::array<uint, 9> PreferredFactors{ 16, 10, 8, 6, 5, 4, 3, 2, 7 };
 };
 
 #endif

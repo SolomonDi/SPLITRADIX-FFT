@@ -18,7 +18,7 @@ constexpr float PI = 3.14159265358979323846f;
 constexpr int BLOCK_1D = 256;
 constexpr int TILE_DIM = 32;
 
-// Исправлено: твиддлы считаются с учетом сегментации внутри строки N
+
 __global__ void twiddle_batch(complex* data, int r, int m, int num_rows, int N) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N * num_rows) return;
@@ -61,7 +61,7 @@ __global__ void transpose(complex* out, complex* in, int width, int height) {
     }
 }
 
-// Исправлено: reshape распределяет данные по всем сегментам строки N
+
 __global__ void reshape_batch(complex* out, complex* in, int r, int m, int num_rows, int N) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N * num_rows) return;
@@ -82,7 +82,7 @@ __global__ void reshape_batch(complex* out, complex* in, int r, int m, int num_r
     out[row * N + new_elem_idx] = in[idx];
 }
 
-// Исправлено: обратный reshape собирает данные со всех сегментов строки N
+
 __global__ void inv_reshape_batch(complex* out, complex* in, int r, int m, int num_rows, int N) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N * num_rows) return;
@@ -180,17 +180,17 @@ __host__ int main(void) {
 
     CUDA_CHECK(cudaMemcpy(d_data, h_pinned, TOTAL_SIZE * sizeof(complex), cudaMemcpyHostToDevice));
 
-    // 1. БПФ по строкам 
+
     FFT_pipeline_batch(d_data, WIDTH, row_dec.factors, d_temp, HEIGHT);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // 2. Транспонирование матрицы
+
     dim3 block(TILE_DIM, TILE_DIM);
     dim3 grid((WIDTH + TILE_DIM - 1) / TILE_DIM, (HEIGHT + TILE_DIM - 1) / TILE_DIM);
     transpose << <grid, block >> > (d_trans, d_data, WIDTH, HEIGHT);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // 3. БПФ по столбцам
+
     FFT_pipeline_batch(d_trans, HEIGHT, col_dec.factors, d_temp, WIDTH);
     CUDA_CHECK(cudaDeviceSynchronize());
 
